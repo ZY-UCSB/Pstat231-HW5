@@ -1,0 +1,246 @@
+---
+title: "Pstat231HW5"
+author: "Zihao Yang"
+date: '2022-05-15'
+output:
+  pdf_document: default
+  html_document: default
+editor_options:
+  chunk_output_type: inline
+---
+
+
+```{r setup, echo=FALSE}
+library(knitr)
+# set global chunk options: images will be 7x5 inches
+knitr::opts_chunk$set(fig.width=7, fig.height=5)
+options(digits = 8)
+## indents are for indenting r code as formatted text
+## They may need to be adjusted depending on your OS
+# if your output looks odd, increase or decrease indent
+indent1 = '    '
+indent2 = '        '
+indent3 = '            '
+```
+
+```{r echo = F, results = 'hide', message=FALSE}
+#install.packages("tidyverse")
+#install.packages("tidymodels")
+#install.packages("ISLR")
+#install.packages("corrr")
+#install.packages("discrim")
+#install.packages("poissonreg")
+#install.packages("klaR")
+#install.packages("corrplot")
+#install.packages("ggthemes")
+#tinytex::install_tinytex()
+#install.packages("janitor")
+#install.packages("glmnet")
+library(tinytex)
+library(tidyverse)
+library(tidymodels)
+library(ISLR)
+library(ggplot2)
+library(corrplot)
+library(ggthemes)
+library(yardstick)
+library(dplyr)
+library(magrittr)
+library(corrr)
+library(discrim)
+library(poissonreg)
+library(klaR)
+library(janitor)
+library(glmnet)
+tidymodels_prefer()
+set.seed(123)
+```
+
+### Q1
+```{r}
+pokemon <- read.csv("Pokemon.csv")# load the data
+head(pokemon)#check data
+#view(pokemon)
+pk <- pokemon %>% clean_names()
+head(pk)
+#view(pk)
+```
+The variable names of the data change into a clean format. The names are unique and consist only of the space character, numbers, and letters. All the names are in lower-case by default. It is useful because it becomes easier for user to understand and access the variables name.
+  
+### Q2
+```{r}
+pk %>% ggplot(aes(x=fct_infreq(type_1))) +
+  geom_bar()# Plot the barplot in descending order
+nlevels(factor(pk$type_1))# Count the number of classes
+table(fct_infreq(pk$type_1))# Count obersvations in each level in descending order
+```
+There are 18 classes of pokemons, and the flying type has only 4 pokemons, which with very few pokemon. Besides, Poison, Fighting, Steel, Ice, and Fairy are less than 30.
+```{r}
+pk2 <- pk %>%
+  filter(type_1 %in%
+           c("Bug","Fire","Grass","Normal","Water","Psychic"))
+pk2$type_1 <- factor(pk2$type_1)
+pk2$legendary <- factor(pk2$legendary)
+pk2$generation <- factor(pk2$generation)
+```
+  
+### Q3
+```{r}
+#initial split
+pk_split <- initial_split(pk2, prop = 0.80,  strata = "type_1")
+pk_train <- training(pk_split)
+pk_test <- testing(pk_split)
+#verify the number of observations
+dim(pk_train)
+dim(pk_test)
+364/(364+94)
+```
+The number of observations is correct.
+```{r}
+pk_folds <- vfold_cv(pk_train,v=5,strata = "type_1")
+```
+Stratifying is useful because it ensures that there is a representative number in each class. In other words, it ensures the same proportion of each class in both training set and the whole dataset. Then the model will have the same performance on training and testing.
+  
+### Q4
+```{r}
+pk_recipe <- recipe(type_1 ~ legendary + generation + 
+                      sp_atk + attack + speed + 
+                      defense + hp + sp_def,
+                    data = pk_train) %>% 
+  step_dummy(c("legendary","generation")) %>% 
+  step_center(all_predictors()) %>% 
+  step_scale(all_predictors())
+```
+  
+### Q5
+```{r}
+pk_spec <- multinom_reg(penalty = tune(), mixture = tune()) %>%
+                set_mode("classification") %>%
+                set_engine("glmnet")
+
+pk_workflow <- workflow() %>% 
+  add_recipe(pk_recipe) %>% 
+  add_model(pk_spec)
+
+penalty_grid <- grid_regular(penalty(range=c(-5, 5)),
+                             mixture(range=c(0, 1)), levels=10)
+
+```
+We will fit 500 models. 10 penalty levels times 10 mixture levels then times 5 folds.
+  
+### Q6
+```{r}
+tune_res <- tune_grid(pk_workflow,resamples = pk_folds, 
+                      grid = penalty_grid)
+autoplot(tune_res)
+```
+According to the graphs, the smaller values of penalty and mixture lead to better accuracy and ROC AUC.
+  
+### Q7
+```{r}
+pk_best<-select_best(tune_res,metrix="roc_auc")
+pk_final<-finalize_workflow(pk_workflow,pk_best)
+pk_fit <- fit(pk_final, data = pk_train)
+predict(pk_fit,new_data=pk_test,type="class")
+test_acc<-augment(pk_fit,new_data=pk_test) %>%
+  accuracy(truth=type_1,estimate=.pred_class)
+test_acc
+```
+According to the output, the model doesn't perform well on the testing set, because the accuracy is only 0.4255.
+  
+### Q8
+```{r}
+roc_auc(augment(pk_fit,new_data=pk_test),
+        type_1,.pred_Bug,.pred_Fire,.pred_Grass,.pred_Normal,
+        .pred_Water,.pred_Psychic)
+
+roc_curve(augment(pk_fit,new_data=pk_test),
+        type_1,.pred_Bug,.pred_Fire,.pred_Grass,.pred_Normal,
+        .pred_Water,.pred_Psychic) %>% 
+  autoplot()
+
+conf_mat(augment(pk_fit,new_data=pk_test),
+         truth=type_1,.pred_class) %>%
+  autoplot(type="heatmap")
+```
+The overall rocauc is not really high with 0.6194, and the model is not performing well because the accuracy is is only 0.4255. According to the area under the roc curve, the model is performing best on Normal type with the largest area, while performing worst on the Psychic type with the smaller area.
+  
+It might be caused by the sample size of the Psychic is not big enough, so we don't have enough features to be used for prediction.
+  
+### Q9
+```{r}
+SC_shots = rep(1:0, c(337, 464))
+PNB <- function(n){
+  x = list()
+  for (i in 1:n){
+    boost = sample(SC_shots, length(SC_shots), replace = T)
+    x = append(x, sum(boost)/length(boost))
+  }
+  return (unlist(x))
+}
+values = PNB(1000)
+hist(values, main = "Bootstrap FG% for Curry")
+quantile(values, probs = seq(0.005, 0.995, 0.99))
+
+```
+The 99% CI is [0.3720, 0.4644] with the endpoints rounded from the result above.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
